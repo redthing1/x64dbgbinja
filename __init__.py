@@ -2,11 +2,13 @@
 import json
 import pathlib
 
-from binaryninja.enums import LogLevel, SymbolType
+from binaryninja.enums import SymbolType
 from binaryninja.interaction import get_save_filename_input, get_open_filename_input
-from binaryninja.log import log
+from binaryninja.log import Logger
 from binaryninja.plugin import PluginCommand
 from binaryninja.settings import Settings
+
+logger = Logger(0, 'x64dbgbinja')
 
 s = Settings()
 s.register_group('dd', 'x64dbg Database Export')
@@ -37,18 +39,13 @@ def export_db(bv):
     """Export symbols and optionally comments from Binary Ninja to an x64dbg database."""
     db = dict()
     module = pathlib.Path(bv.file.original_filename)
-    dbext = None
-    if bv.arch.name.endswith("x86_64"):
-        dbext = 'dd64'
-    elif bv.arch.name.endswith("x86"):
-        dbext = 'dd32'
-    else:
-        raise Exception("Unsupported architecture")
+    outpath = bv.file.database.globals.get('x64dbg_db_save_path', pathlib.Path(bv.file.filename).parent)
+    dbext = 'dd{}'.format(bv.arch.address_size * 8)
 
-    if not (f := get_save_filename_input('Export database', dbext, f'{module.stem}.{dbext}')):
+    if not (f := get_save_filename_input('Export database', f'*.{dbext}', f'{outpath}/{module.stem}.{dbext}')):
         return
     file = pathlib.Path(f)
-    log(LogLevel.InfoLog, f'Exporting database: {file}')
+    logger.log_info(f'Exporting database: {file}')
 
     # Export symbols to x64dbg labels
     db['labels'] = [
@@ -60,7 +57,7 @@ def export_db(bv):
         }
         for symbol in bv.get_symbols()
     ]
-    log(LogLevel.DebugLog, 'Label(s) exported: {}'.format(len(db['labels'])))
+    logger.log_debug('Label(s) exported: {}'.format(len(db['labels'])))
 
     s = Settings()
     if s.get_bool('dd.comments'):
@@ -73,10 +70,11 @@ def export_db(bv):
             }
             for func in bv.functions for address in func.comments
         ]
-        log(LogLevel.DebugLog, 'Comment(s) exported: {}'.format(len(db['comments'])))
+        logger.log_debug('Comment(s) exported: {}'.format(len(db['comments'])))
 
     file.write_text(json.dumps(db))
-    log(LogLevel.InfoLog, 'Done!')
+    bv.file.database.write_global('x64dbg_db_save_path', str(file.parent))
+    logger.log_info('Done!')
 
 
 def import_db(bv):
@@ -86,7 +84,7 @@ def import_db(bv):
     if not (f := get_open_filename_input('Import database', '*.dd{}'.format(bv.arch.default_int_size * 8))):
         return
     file = pathlib.Path(f)
-    log(LogLevel.InfoLog, f'Importing database: {file}')
+    logger.log_info(f'Importing database: {file}')
 
     db = json.load(file.open())
 
@@ -107,7 +105,7 @@ def import_db(bv):
                 continue
             func.name = label['text']
             count += 1
-    log(LogLevel.DebugLog, 'Label(s) imported: {}/{}'.format(count, len(labels)))
+    logger.log_debug('Label(s) imported: {}/{}'.format(count, len(labels)))
 
     count = 0
     comments = db.get('comments', list())
@@ -118,10 +116,20 @@ def import_db(bv):
         for func in bv.get_functions_containing(address):
             func.set_comment_at(address, comment['text'])
         count += 1
-    log(LogLevel.DebugLog, 'Comment(s) imported: {}/{}'.format(count, len(comments)))
+    logger.log_debug('Comment(s) imported: {}/{}'.format(count, len(comments)))
 
-    log(LogLevel.InfoLog, 'Done!')
+    logger.log_info('Done!')
 
 
-PluginCommand.register('x64dbg\\Export database', 'Export x64dbg database', export_db)
-PluginCommand.register('x64dbg\\Import database', 'Import x64dbg database', import_db)
+def is_valid(bv):
+    """Determine if this is the correct arch."""
+    if not bv.file.database:
+        return False
+    if bv.arch:
+        return 'x86' in bv.arch.name
+    else:
+        return False
+
+
+PluginCommand.register('x64dbg\\Export database', 'Export x64dbg database', export_db, is_valid)
+PluginCommand.register('x64dbg\\Import database', 'Import x64dbg database', import_db, is_valid)
